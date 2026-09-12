@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ThreadRadar</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%230f172a'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%2334d399' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='3' fill='%2334d399'/%3E%3C/svg%3E">
+</head>
+<body>
+  <div id="login" class="overlay" hidden>
+    <form id="login-form" class="panel login">
+      <h1>ThreadRadar</h1>
+      <p>Enter the owner password to open the dashboard.</p>
+      <input id="password" type="password" autocomplete="current-password" placeholder="Password" required>
+      <button type="submit" class="primary">Sign in</button>
+      <p id="login-error" class="error" role="alert"></p>
+    </form>
+  </div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"></span>
+      <div>
+        <strong>ThreadRadar</strong>
+        <small>Most AI waits for you to ask. Ours knows when to come and find you.</small>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <div class="segmented" role="group" aria-label="Workspace">
+        <button data-space="demo" class="active">Demo</button>
+        <button data-space="live">Live</button>
+      </div>
+      <span id="pill-worker" class="pill">worker</span>
+      <span id="pill-ai" class="pill">ai</span>
+      <button id="logout" class="ghost" hidden>Sign out</button>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button data-tab="radar" class="active">Radar</button>
+    <button data-tab="sources">Sources</button>
+    <button data-tab="settings">Settings</button>
+    <button data-tab="activity">Activity</button>
+  </nav>
+
+  <main>
+    <div id="banner" class="banner" hidden></div>
+
+    <section id="tab-radar" class="tab">
+      <div class="hero">
+        <div>
+          <p class="eyebrow" id="hero-source">Slack, Telegram and Gmail</p>
+          <h2 id="hero-title">Load the demo to see what you missed.</h2>
+          <p id="hero-sub" class="muted"></p>
+        </div>
+        <div class="actions" id="radar-actions"></div>
+      </div>
+
+      <div class="stats" id="stats"></div>
+
+      <div class="columns">
+        <div class="col">
+          <h3 class="section-title critical">Needs you now <span id="count-needs" class="count"></span></h3>
+          <div id="list-needs" class="cards"></div>
+          <h3 class="section-title">Tasks <span id="count-tasks" class="count"></span></h3>
+          <div id="list-tasks" class="cards"></div>
+        </div>
+        <div class="col">
+          <h3 class="section-title">Briefing <span id="count-fyi" class="count"></span></h3>
+          <div id="list-fyi" class="cards"></div>
+          <details class="filtered">
+            <summary>Filtered as noise <span id="count-ignored" class="count"></span></summary>
+            <div id="list-ignored" class="cards compact"></div>
+          </details>
+          <details class="filtered">
+            <summary>Done or dismissed <span id="count-done" class="count"></span></summary>
+            <div id="list-done" class="cards compact"></div>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-sources" class="tab" hidden>
+      <div class="hero small">
+        <div>
+          <h2>Sources</h2>
+          <p class="muted">The agent reads only the conversations you configure. Credentials live on the server in <code>.env</code>, never in the browser.</p>
+        </div>
+        <div class="actions" id="source-actions"></div>
+      </div>
+      <div id="sources" class="cards three"></div>
+      <div class="panel">
+        <h3>Private alerts (Telegram)</h3>
+        <div id="alerts-status"></div>
+      </div>
+    </section>
+
+    <section id="tab-settings" class="tab" hidden>
+      <form id="settings-form" class="panel settings">
+        <h2>Owner profile</h2>
+        <p class="muted">The agent uses this to decide what is relevant, what is noise, and what is critical.</p>
+        <div class="grid">
+          <label>Your name <input name="name" required></label>
+          <label>Timezone <input name="timezone" required></label>
+          <label class="wide">Responsibilities <textarea name="responsibilities" rows="2"></textarea></label>
+          <label class="wide">Priorities (comma separated keywords) <textarea name="priorities" rows="2"></textarea></label>
+          <label class="wide">Important people (comma separated) <input name="importantPeople"></label>
+          <label class="wide">Ignored topics (comma separated) <input name="ignoreTopics"></label>
+          <label class="wide">Critical alert rules <textarea name="criticalRules" rows="3"></textarea></label>
+        </div>
+        <h2>Monitoring</h2>
+        <div class="grid">
+          <label>Routine review
+            <select name="reviewMinutes">
+              <option value="0">Off</option>
+              <option value="15">Every 15 minutes</option>
+              <option value="60">Every hour</option>
+              <option value="240">Every 4 hours</option>
+              <option value="1440">Daily</option>
+            </select>
+          </label>
+          <label>Critical window (minutes before a deadline) <input name="criticalWindowMinutes" type="number" min="1" max="1440"></label>
+          <label class="check"><input name="criticalChecks" type="checkbox"> Critical monitoring: analyse new messages immediately</label>
+          <label class="check"><input name="externalAlerts" type="checkbox"> Send private Telegram alerts for critical items (live only)</label>
+          <label>Quiet hours start <input name="quietStart" type="number" min="0" max="23"></label>
+          <label>Quiet hours end <input name="quietEnd" type="number" min="0" max="23"></label>
+          <label class="check"><input name="criticalOverride" type="checkbox"> Critical alerts may break quiet hours</label>
+          <label class="check"><input name="paused" type="checkbox"> Pause all monitoring</label>
+        </div>
+        <div class="actions">
+          <button type="submit" class="primary">Save settings</button>
+          <span id="settings-status" class="muted"></span>
+        </div>
+      </form>
+    </section>
+
+    <section id="tab-activity" class="tab" hidden>
+      <div class="columns">
+        <div class="col">
+          <h3 class="section-title">Alerts</h3>
+          <div id="list-alerts" class="cards compact"></div>
+        </div>
+        <div class="col">
+          <h3 class="section-title">Worker log</h3>
+          <div id="list-runs" class="log"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <template id="tpl-card">
+    <article class="card">
+      <div class="card-head">
+        <span class="badge"></span>
+        <span class="source"></span>
+        <span class="conversation"></span>
+        <span class="synthetic" hidden>synthetic demo data</span>
+      </div>
+      <h4 class="title"></h4>
+      <p class="summary"></p>
+      <dl class="meta"></dl>
+      <div class="card-foot">
+        <span class="analyzer"></span>
+        <div class="buttons"></div>
+      </div>
+      <div class="evidence" hidden></div>
+    </article>
+  </template>
+
+  <script src="/app.js"></script>
+</body>
+</html>

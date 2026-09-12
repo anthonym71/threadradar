@@ -1,0 +1,12 @@
+services:
+  threadradar:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      DATABASE_PATH: /app/data/threadradar.sqlite
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./data:/app/data

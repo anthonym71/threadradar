@@ -1,14 +1,16 @@
 {
   "name": "threadradar",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Single-owner conversation attention agent: Slack, Telegram and Gmail",
+  "description": "ThreadRadar: a single-owner conversation attention agent for Slack, Telegram and Gmail. Filters noise, synthesises what matters with evidence, and privately alerts you to genuinely critical items.",
+  "license": "MIT",
   "engines": { "node": ">=22.16.0" },
   "scripts": {
     "start": "node --env-file-if-exists=.env server.mjs",
     "dev": "node --watch --env-file-if-exists=.env server.mjs",
     "test": "node --test test/*.test.mjs",
-    "check": "node --check server.mjs && node --check core.mjs && node --check connectors.mjs && node --check public/app.js"
+    "check": "node --check server.mjs && node --check src/app.mjs && node --check src/worker.mjs && node --check src/store.mjs && node --check src/analysis.mjs && node --check public/app.js",
+    "keygen": "node -e \"console.log(require('node:crypto').randomBytes(32).toString('hex'))\""
   }
 }
