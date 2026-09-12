@@ -65,8 +65,8 @@ test('claim leases a job, finish removes it, a newer generation survives a stale
 
 test('paused space is never claimed', () => {
   const s = new Store(':memory:');
-  s.saveSettings('demo', { ...defaults(), paused: true, criticalChecks: true }, 0);
-  s.ingest('demo', [raw('1', 'a')], { now: 0, force: true });
+  s.saveSettings('demo:u1', { ...defaults(), paused: true, criticalChecks: true }, 0);
+  s.ingest('demo:u1', [raw('1', 'a')], { now: 0, force: true });
   assert.equal(s.claim(10), null);
   s.close();
 });
@@ -76,7 +76,7 @@ test('settings validation', () => {
   assert.throws(() => validateSettings({ ...defaults(), timezone: 'Mars/Olympus' }), /timezone/);
   assert.throws(() => validateSettings({ ...defaults(), quietStart: 25 }), /quietStart/);
   const s = new Store(':memory:');
-  const saved = s.saveSettings('demo', { ...defaults(), externalAlerts: true });
+  const saved = s.saveSettings('demo:u1', { ...defaults(), externalAlerts: true });
   assert.equal(saved.externalAlerts, false, 'demo can never send externally');
   s.close();
 });
@@ -104,4 +104,29 @@ test('demo fixture is fully synthetic and covers all three sources', () => {
   assert.ok(m.every(x => x.synthetic === true && x.account === 'synthetic-demo'));
   assert.deepEqual([...new Set(m.map(x => x.source))].sort(), ['gmail', 'slack', 'telegram']);
   m.forEach(normalize); // all valid
+});
+
+test('users: create, authenticate, sessions, encrypted connectors, delete cascades', () => {
+  const s = new Store(':memory:');
+  assert.equal(s.userCount(), 0);
+  const u = s.createUser({ username: 'Anthony', password: 'correct-horse-battery', role: 'admin' });
+  assert.equal(u.username, 'anthony');
+  assert.throws(() => s.createUser({ username: 'anthony', password: 'correct-horse-battery' }), /exists/);
+  assert.throws(() => s.createUser({ username: 'a', password: 'correct-horse-battery' }), /Username/);
+  assert.throws(() => s.createUser({ username: 'bob', password: 'short' }), /Password/);
+  assert.equal(s.authenticate('anthony', 'wrong'), null);
+  assert.equal(s.authenticate('anthony', 'correct-horse-battery').id, u.id);
+  const token = s.createSession(u.id);
+  assert.equal(s.session(token).id, u.id);
+  s.updateUser(u.id, { password: 'another-long-password' });
+  assert.equal(s.session(token), null, 'password change revokes sessions');
+  s.saveConnector(u.id, 'slack', { botToken: 'xoxb-secret', channelIds: 'C1', backfillHours: 24 });
+  assert.equal(s.connector(u.id, 'slack').config.botToken, 'xoxb-secret');
+  assert.equal(s.db.prepare('SELECT config FROM connectors').get().config.includes('xoxb'), false, 'encrypted at rest');
+  s.ingest('live:' + u.id, [raw('1', 'hello')]);
+  s.deleteUser(u.id);
+  assert.equal(s.userCount(), 0);
+  assert.equal(s.connectors(u.id).length, 0);
+  assert.equal(s.messageCount('live:' + u.id), 0);
+  s.close();
 });

@@ -1,27 +1,35 @@
 /**
- * Telegram connector (Bot API).
- *  - Intake: the bot must be a member of each watched group (TELEGRAM_CHAT_IDS) with
- *    privacy mode disabled in @BotFather so it can read all group messages.
- *    Polling mode (default) uses getUpdates and needs no public URL.
- *    Webhook mode (TELEGRAM_WEBHOOK_SECRET + HTTPS APP_ORIGIN) uses POST /webhooks/telegram.
- *  - Private alerts: the owner sends /start to the bot from their own account; the private
- *    chat id must equal TELEGRAM_ALERT_CHAT_ID. Only then can alerts be sent.
+ * Telegram connector (per user, Bot API). Config: { botToken, chatIds, alertChatId, backfillHours }.
+ *  - Intake: the user's bot must be in each watched group with privacy mode disabled
+ *    (@BotFather /setprivacy -> Disable). Polling uses getUpdates; Telegram keeps
+ *    undelivered updates for 24 hours only, so backfill is capped at that.
+ *  - Private alerts: the owner sends /start to their bot from their own account; the
+ *    private chat id must equal alertChatId. Only then can alerts be sent.
  */
 import { hash, list, requestJson } from '../util.mjs';
 
-const api = env => `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
-export const alertChatFingerprint = env => hash([env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_ALERT_CHAT_ID]);
-export const telegramIntakeReady = env => !!(env.TELEGRAM_BOT_TOKEN && list(env.TELEGRAM_CHAT_IDS).length);
-export const telegramAlertsReady = env => !!(env.TELEGRAM_BOT_TOKEN && /^[1-9]\d*$/.test(env.TELEGRAM_ALERT_CHAT_ID || ''));
-export const telegramWebhookMode = env => env.TELEGRAM_MODE === 'webhook';
+const api = token => `https://api.telegram.org/bot${token}`;
+export const alertChatFingerprint = config => hash([config.botToken, config.alertChatId]);
 
-/** Normalise one update into a raw message (or null). */
-export function telegramMessage(update, env, store) {
+export function validateTelegramConfig(input, existing = null) {
+  const botToken = typeof input.botToken === 'string' && input.botToken && !/^•+/.test(input.botToken) ? input.botToken.trim() : existing?.botToken;
+  if (!botToken || !/^\d+:[A-Za-z0-9_-]{20,}$/.test(botToken)) throw new Error('Telegram bot token looks wrong (expected 123456:ABC...)');
+  const chatIds = list(input.chatIds);
+  if (chatIds.some(c => !/^-?\d+$/.test(c))) throw new Error('Telegram chat IDs must be numeric (e.g. -1001234567890)');
+  const alertChatId = String(input.alertChatId || '').trim();
+  if (alertChatId && !/^[1-9]\d*$/.test(alertChatId)) throw new Error('Your private chat id must be a positive number');
+  if (!chatIds.length && !alertChatId) throw new Error('Enter at least one group chat id to watch or your private chat id for alerts');
+  const backfillHours = Math.min(24, Number(input.backfillHours ?? existing?.backfillHours ?? 24));
+  if (!Number.isFinite(backfillHours) || backfillHours < 1) throw new Error('Backfill must be between 1 and 24 hours (Telegram keeps updates for 24 h)');
+  return { botToken, chatIds: chatIds.join(','), alertChatId, backfillHours };
+}
+
+export function telegramMessage(update, config, store, space) {
   const m = update.edited_message || update.message;
   if (!m?.text || m.from?.is_bot || !['group', 'supergroup'].includes(m.chat?.type)) return null;
-  if (!list(env.TELEGRAM_CHAT_IDS).includes(String(m.chat.id)) || m.text.startsWith('/')) return null;
+  if (!list(config.chatIds).includes(String(m.chat.id)) || m.text.startsWith('/')) return null;
   const account = String(m.chat.id);
-  const parent = m.reply_to_message ? store.message('live', hash(['telegram', account, String(m.reply_to_message.message_id)])) : null;
+  const parent = m.reply_to_message ? store.message(space, hash(['telegram', account, String(m.reply_to_message.message_id)])) : null;
   const threadKey = m.message_thread_id || m.reply_to_message?.message_id || m.message_id;
   return {
     source: 'telegram',
@@ -36,52 +44,46 @@ export function telegramMessage(update, env, store) {
   };
 }
 
-/**
- * Handle one update from either the webhook or the poller.
- * Records alert-chat verification when the owner sends /start in the private chat.
- */
-export function handleTelegramUpdate(update, env, store, { delivery = true, now = Date.now() } = {}) {
+/** Handle one update. Records alert-chat verification when the owner sends /start privately. */
+export function handleTelegramUpdate(update, config, store, space, { now = Date.now(), minDate = 0 } = {}) {
   const msg = update.message;
   let verified = false;
-  if (msg?.chat?.type === 'private' && String(msg.chat.id) === String(env.TELEGRAM_ALERT_CHAT_ID) && msg.from?.id === msg.chat.id && !msg.from?.is_bot && /^\/start(?:\s|$)/.test(msg.text || '')) {
-    store.set('telegram.verified', alertChatFingerprint(env));
-    store.set('telegram.verifiedAt', new Date(now).toISOString());
+  if (msg?.chat?.type === 'private' && config.alertChatId && String(msg.chat.id) === String(config.alertChatId) && msg.from?.id === msg.chat.id && !msg.from?.is_bot && /^\/start(?:\s|$)/.test(msg.text || '')) {
+    store.set(`telegram.verified:${space}`, alertChatFingerprint(config));
+    store.set(`telegram.verifiedAt:${space}`, new Date(now).toISOString());
     verified = true;
   }
-  const raw = telegramMessage(update, env, store);
+  const raw = telegramMessage(update, config, store, space);
   let ingested = 0;
-  if (raw) ingested = store.ingest('live', [raw], { delivery: delivery ? `telegram:${update.update_id}` : null, now });
+  if (raw && Date.parse(raw.sentAt) >= minDate) ingested = store.ingest(space, [{ ...raw, backfill: !store.get(`telegram.offset:${space}`) }], { now });
   return { ingested, verified, raw };
 }
 
-/** Long-poll-free getUpdates pass. Returns number of ingested messages. */
-export async function pollTelegram(store, env, fetcher = fetch, now = Date.now()) {
-  if (!env.TELEGRAM_BOT_TOKEN || telegramWebhookMode(env)) return 0;
-  const offset = store.get('telegram.offset', 0);
-  const data = await requestJson(fetcher, `${api(env)}/getUpdates?${new URLSearchParams({ offset: String(offset), timeout: '0', limit: '100', allowed_updates: JSON.stringify(['message', 'edited_message']) })}`);
+export async function pollTelegram(store, space, config, fetcher = fetch, now = Date.now()) {
+  const offset = store.get(`telegram.offset:${space}`, 0);
+  const minDate = offset ? 0 : now - Number(config.backfillHours || 24) * 3600000;
+  const data = await requestJson(fetcher, `${api(config.botToken)}/getUpdates?${new URLSearchParams({ offset: String(offset), timeout: '0', limit: '100', allowed_updates: JSON.stringify(['message', 'edited_message']) })}`);
   if (!data.ok) throw new Error(data.description || 'Telegram getUpdates failed');
-  let ingested = 0, last = offset;
+  let ingested = 0, last = offset, verified = false;
   for (const update of data.result || []) {
-    ingested += handleTelegramUpdate(update, env, store, { now }).ingested;
+    const r = handleTelegramUpdate(update, config, store, space, { now, minDate });
+    ingested += r.ingested; verified = verified || r.verified;
     last = update.update_id + 1;
   }
-  if (last !== offset) store.set('telegram.offset', last);
-  store.set('source:telegram', { status: 'connected', mode: 'polling', lastSync: new Date(now).toISOString(), error: null });
-  return ingested;
+  if (last !== offset || !offset) store.set(`telegram.offset:${space}`, last || 1);
+  return { ingested, verified };
 }
 
-export async function registerTelegramWebhook(env, fetcher = fetch) {
-  const data = await requestJson(fetcher, `${api(env)}/setWebhook`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url: `${env.APP_ORIGIN}/webhooks/telegram`, secret_token: env.TELEGRAM_WEBHOOK_SECRET, allowed_updates: ['message', 'edited_message'] }) });
-  return data.ok === true;
+export async function getBotInfo(config, fetcher = fetch) {
+  const data = await requestJson(fetcher, `${api(config.botToken)}/getMe`);
+  if (!data.ok) throw new Error(data.description || 'Telegram getMe failed');
+  return data.result;
 }
 
-/**
- * Send a private alert. Never reports success without a provider message id.
- * States: provider_accepted | failed | unknown (no confirmation, not retried).
- */
-export async function sendTelegram(env, text, fetcher = fetch) {
+/** Send a private alert. Never reports success without a provider message id. */
+export async function sendTelegram(config, text, fetcher = fetch) {
   try {
-    const res = await fetcher(`${api(env)}/sendMessage`, { method: 'POST', signal: AbortSignal.timeout(10000), headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: env.TELEGRAM_ALERT_CHAT_ID, text: text.slice(0, 3800), link_preview_options: { is_disabled: true } }) });
+    const res = await fetcher(`${api(config.botToken)}/sendMessage`, { method: 'POST', signal: AbortSignal.timeout(10000), headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: config.alertChatId, text: text.slice(0, 3800), link_preview_options: { is_disabled: true } }) });
     const result = await res.json().catch(() => ({}));
     if (res.ok && result.ok && Number.isInteger(result.result?.message_id)) {
       return { state: 'provider_accepted', providerMessageId: String(result.result.message_id), detail: 'Telegram accepted the message. This is delivery to Telegram, not a read receipt.' };

@@ -8,13 +8,16 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%230f172a'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%2334d399' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='3' fill='%2334d399'/%3E%3C/svg%3E">
 </head>
 <body>
-  <div id="login" class="overlay" hidden>
-    <form id="login-form" class="panel login">
-      <h1>ThreadRadar</h1>
-      <p>Enter the owner password to open the dashboard.</p>
-      <input id="password" type="password" autocomplete="current-password" placeholder="Password" required>
-      <button type="submit" class="primary">Sign in</button>
-      <p id="login-error" class="error" role="alert"></p>
+  <div id="auth" class="overlay" hidden>
+    <form id="auth-form" class="panel login">
+      <div class="brand"><span class="logo" aria-hidden="true"></span><h1>ThreadRadar</h1></div>
+      <p id="auth-intro" class="muted"></p>
+      <label>Username <input id="auth-username" name="username" autocomplete="username" required></label>
+      <label>Password <input id="auth-password" name="password" type="password" autocomplete="current-password" required minlength="10"></label>
+      <label id="auth-confirm-row" hidden>Confirm password <input id="auth-confirm" type="password" autocomplete="new-password" minlength="10"></label>
+      <button type="submit" class="primary" id="auth-submit">Sign in</button>
+      <p id="auth-error" class="error" role="alert"></p>
+      <p class="tiny muted">Your conversations are sensitive. Sessions are HttpOnly cookies, passwords are scrypt-hashed, and integration tokens are encrypted at rest on the server.</p>
     </form>
   </div>
 
@@ -28,20 +31,22 @@
     </div>
     <div class="topbar-right">
       <div class="segmented" role="group" aria-label="Workspace">
-        <button data-space="demo" class="active">Demo</button>
-        <button data-space="live">Live</button>
+        <button data-mode="demo" class="active">Demo</button>
+        <button data-mode="live">Live</button>
       </div>
       <span id="pill-worker" class="pill">worker</span>
       <span id="pill-ai" class="pill">ai</span>
+      <span id="pill-user" class="pill user" hidden></span>
       <button id="logout" class="ghost" hidden>Sign out</button>
     </div>
   </header>
 
   <nav class="tabs" role="tablist">
     <button data-tab="radar" class="active">Radar</button>
-    <button data-tab="sources">Sources</button>
+    <button data-tab="integrations">Integrations</button>
     <button data-tab="settings">Settings</button>
     <button data-tab="activity">Activity</button>
+    <button data-tab="admin" id="tab-admin-btn" hidden>Admin</button>
   </nav>
 
   <main>
@@ -56,9 +61,7 @@
         </div>
         <div class="actions" id="radar-actions"></div>
       </div>
-
       <div class="stats" id="stats"></div>
-
       <div class="columns">
         <div class="col">
           <h3 class="section-title critical">Needs you now <span id="count-needs" class="count"></span></h3>
@@ -69,27 +72,21 @@
         <div class="col">
           <h3 class="section-title">Briefing <span id="count-fyi" class="count"></span></h3>
           <div id="list-fyi" class="cards"></div>
-          <details class="filtered">
-            <summary>Filtered as noise <span id="count-ignored" class="count"></span></summary>
-            <div id="list-ignored" class="cards compact"></div>
-          </details>
-          <details class="filtered">
-            <summary>Done or dismissed <span id="count-done" class="count"></span></summary>
-            <div id="list-done" class="cards compact"></div>
-          </details>
+          <details class="filtered"><summary>Filtered as noise <span id="count-ignored" class="count"></span></summary><div id="list-ignored" class="cards compact"></div></details>
+          <details class="filtered"><summary>Done or dismissed <span id="count-done" class="count"></span></summary><div id="list-done" class="cards compact"></div></details>
         </div>
       </div>
     </section>
 
-    <section id="tab-sources" class="tab" hidden>
+    <section id="tab-integrations" class="tab" hidden>
       <div class="hero small">
         <div>
-          <h2>Sources</h2>
-          <p class="muted">The agent reads only the conversations you configure. Credentials live on the server in <code>.env</code>, never in the browser.</p>
+          <h2>Your integrations</h2>
+          <p class="muted">Connect the accounts ThreadRadar may read. Tokens are stored encrypted on the server and never sent back to the browser. The first run reads back as far as you choose; after that the worker monitors continuously.</p>
         </div>
-        <div class="actions" id="source-actions"></div>
+        <div class="actions" id="integration-actions"></div>
       </div>
-      <div id="sources" class="cards three"></div>
+      <div class="cards three" id="integrations"></div>
       <div class="panel">
         <h3>Private alerts (Telegram)</h3>
         <div id="alerts-status"></div>
@@ -113,11 +110,7 @@
         <div class="grid">
           <label>Routine review
             <select name="reviewMinutes">
-              <option value="0">Off</option>
-              <option value="15">Every 15 minutes</option>
-              <option value="60">Every hour</option>
-              <option value="240">Every 4 hours</option>
-              <option value="1440">Daily</option>
+              <option value="0">Off</option><option value="15">Every 15 minutes</option><option value="60">Every hour</option><option value="240">Every 4 hours</option><option value="1440">Daily</option>
             </select>
           </label>
           <label>Critical window (minutes before a deadline) <input name="criticalWindowMinutes" type="number" min="1" max="1440"></label>
@@ -128,22 +121,45 @@
           <label class="check"><input name="criticalOverride" type="checkbox"> Critical alerts may break quiet hours</label>
           <label class="check"><input name="paused" type="checkbox"> Pause all monitoring</label>
         </div>
-        <div class="actions">
-          <button type="submit" class="primary">Save settings</button>
-          <span id="settings-status" class="muted"></span>
+        <div class="actions"><button type="submit" class="primary">Save settings</button><span id="settings-status" class="muted"></span></div>
+      </form>
+      <form id="password-form" class="panel settings">
+        <h2>Change password</h2>
+        <div class="grid">
+          <label>Current password <input name="currentPassword" type="password" autocomplete="current-password" required></label>
+          <label>New password (10+ characters) <input name="newPassword" type="password" autocomplete="new-password" minlength="10" required></label>
         </div>
+        <div class="actions"><button type="submit">Update password</button><span id="password-status" class="muted"></span></div>
       </form>
     </section>
 
     <section id="tab-activity" class="tab" hidden>
       <div class="columns">
+        <div class="col"><h3 class="section-title">Alerts</h3><div id="list-alerts" class="cards compact"></div></div>
+        <div class="col"><h3 class="section-title">Worker log</h3><div id="list-runs" class="log"></div></div>
+      </div>
+    </section>
+
+    <section id="tab-admin" class="tab" hidden>
+      <div class="hero small">
+        <div><h2>Admin console</h2><p class="muted">Manage who can sign in. Each user has their own profile, integrations, demo and live workspaces. Deleting a user deletes all of their data and credentials.</p></div>
+      </div>
+      <div class="columns">
         <div class="col">
-          <h3 class="section-title">Alerts</h3>
-          <div id="list-alerts" class="cards compact"></div>
+          <h3 class="section-title">Users</h3>
+          <div id="admin-users" class="cards"></div>
         </div>
         <div class="col">
-          <h3 class="section-title">Worker log</h3>
-          <div id="list-runs" class="log"></div>
+          <form id="admin-create" class="panel settings">
+            <h3>Add a user</h3>
+            <div class="grid">
+              <label>Username <input name="username" required autocomplete="off"></label>
+              <label>Role <select name="role"><option value="user">User</option><option value="admin">Admin</option></select></label>
+              <label class="wide">Temporary password (10+ characters) <input name="password" type="text" minlength="10" required autocomplete="off"></label>
+            </div>
+            <div class="actions"><button type="submit" class="primary">Create user</button><span id="admin-status" class="muted"></span></div>
+          </form>
+          <div class="panel" id="admin-server"><h3>Server</h3><div id="admin-server-body"></div></div>
         </div>
       </div>
     </section>
@@ -152,18 +168,12 @@
   <template id="tpl-card">
     <article class="card">
       <div class="card-head">
-        <span class="badge"></span>
-        <span class="source"></span>
-        <span class="conversation"></span>
-        <span class="synthetic" hidden>synthetic demo data</span>
+        <span class="badge"></span><span class="source"></span><span class="conversation"></span><span class="synthetic" hidden>synthetic demo data</span>
       </div>
       <h4 class="title"></h4>
       <p class="summary"></p>
       <dl class="meta"></dl>
-      <div class="card-foot">
-        <span class="analyzer"></span>
-        <div class="buttons"></div>
-      </div>
+      <div class="card-foot"><span class="analyzer"></span><div class="buttons"></div></div>
       <div class="evidence" hidden></div>
     </article>
   </template>

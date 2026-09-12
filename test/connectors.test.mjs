@@ -2,9 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { Store } from '../src/store.mjs';
-import { verifySlack, slackEventMessage, pollSlack } from '../src/connectors/slack.mjs';
-import { telegramMessage, handleTelegramUpdate, pollTelegram, sendTelegram, alertChatFingerprint } from '../src/connectors/telegram.mjs';
-import { encrypt, decrypt, gmailToRaw, pollGmail, gmailReady } from '../src/connectors/gmail.mjs';
+import { verifySlack, pollSlack, validateSlackConfig } from '../src/connectors/slack.mjs';
+import { telegramMessage, handleTelegramUpdate, pollTelegram, sendTelegram, alertChatFingerprint, validateTelegramConfig } from '../src/connectors/telegram.mjs';
+import { gmailToRaw, pollGmail, validateGmailConfig } from '../src/connectors/gmail.mjs';
+import { encrypt, decrypt } from '../src/secrets.mjs';
 import { alertBlockReason, inQuietHours } from '../src/policy.mjs';
 import { defaults } from '../src/profile.mjs';
 
@@ -19,24 +20,10 @@ test('verifySlack accepts a correctly signed body and rejects stale or forged on
   assert.equal(verifySlack(raw, { 'x-slack-request-timestamp': '1', 'x-slack-signature': sig }, secret), false);
 });
 
-test('slackEventMessage only accepts watched channels and human messages', () => {
-  const store = new Store(':memory:');
-  const env = { SLACK_TEAM_ID: 'T1', SLACK_CHANNEL_IDS: 'C1,C2' };
-  const ev = (over = {}) => ({ team_id: 'T1', event: { type: 'message', channel: 'C1', user: 'U1', text: 'hello', ts: '1757678400.000100', ...over } });
-  const m = slackEventMessage(ev(), env, store);
-  assert.equal(m.source, 'slack');
-  assert.equal(m.messageId, 'C1:1757678400.000100');
-  assert.match(m.sourceUrl, /^https:\/\/app\.slack\.com\//);
-  assert.equal(slackEventMessage(ev({ channel: 'C9' }), env, store), null, 'unwatched channel');
-  assert.equal(slackEventMessage(ev({ bot_id: 'B1' }), env, store), null, 'bot message');
-  assert.equal(slackEventMessage({ ...ev(), team_id: 'T2' }, env, store), null, 'other workspace');
-  store.close();
-});
-
 test('pollSlack fetches history and thread replies, resolves names, stores a cursor', async () => {
   const store = new Store(':memory:');
-  store.saveSettings('live', { ...defaults(), criticalChecks: true });
-  const env = { SLACK_BOT_TOKEN: 'xoxb-test', SLACK_CHANNEL_IDS: 'C1' };
+  store.saveSettings('live:u1', { ...defaults(), criticalChecks: true });
+  const config = validateSlackConfig({ botToken: 'xoxb-test', channelIds: 'C1', backfillHours: 24 });
   const calls = [];
   const fetcher = async (url, opts) => {
     calls.push(url);
@@ -55,22 +42,24 @@ test('pollSlack fetches history and thread replies, resolves names, stores a cur
     ] });
     throw new Error(`unexpected ${url}`);
   };
-  const n = await pollSlack(store, env, fetcher, 1757678460000); // one minute after the fixture root message
+  const { ingested: n, team } = await pollSlack(store, 'live:u1', config, fetcher, 1757678460000); // one minute after the fixture root message
   assert.equal(n, 2, 'root + reply ingested, channel_join skipped');
-  const msgs = store.messages('live');
+  assert.equal(team, 'T1');
+  const msgs = store.messages('live:u1');
   assert.equal(msgs[0].sender, 'Dana Ryan');
   assert.equal(msgs[0].conversationName, '#client-launch');
   assert.equal(msgs[1].conversationName, '#client-launch (thread)');
   assert.equal(new Set(msgs.map(m => m.topicId)).size, 1, 'reply shares the root topic');
-  assert.equal(store.get('slack.cursor:C1'), '1757678500.000100');
-  assert.equal(store.get('source:slack').status, 'connected');
+  assert.equal(store.get('slack.cursor:live:u1:C1'), '1757678500.000100');
   store.close();
 });
 
 test('pollSlack surfaces API errors', async () => {
   const store = new Store(':memory:');
   const fetcher = async () => jsonRes({ ok: false, error: 'not_in_channel' });
-  await assert.rejects(() => pollSlack(store, { SLACK_BOT_TOKEN: 'x', SLACK_CHANNEL_IDS: 'C1' }, fetcher), /not_in_channel/);
+  await assert.rejects(() => pollSlack(store, 'live:u1', { botToken: 'xoxb-x', channelIds: 'C1' }, fetcher), /not_in_channel/);
+  assert.throws(() => validateSlackConfig({ botToken: 'bad', channelIds: 'C1' }), /xoxb/);
+  assert.throws(() => validateSlackConfig({ botToken: 'xoxb-x', channelIds: '' }), /channel ID/);
   store.close();
 });
 
@@ -79,44 +68,49 @@ const tgUpdate = (over = {}, chat = {}) => ({ update_id: 1, message: { message_i
 
 test('telegramMessage accepts watched groups only and ignores bot commands', () => {
   const store = new Store(':memory:');
-  const env = { TELEGRAM_CHAT_IDS: '-100' };
-  const m = telegramMessage(tgUpdate(), env, store);
+  const config = { chatIds: '-100' };
+  const m = telegramMessage(tgUpdate(), config, store, 'live:u1');
   assert.equal(m.source, 'telegram');
   assert.equal(m.conversationName, 'Founders (Telegram)');
-  assert.equal(telegramMessage(tgUpdate({}, { id: -200 }), env, store), null);
-  assert.equal(telegramMessage(tgUpdate({ text: '/start' }), env, store), null);
-  assert.equal(telegramMessage(tgUpdate({}, { type: 'private' }), env, store), null);
+  assert.equal(telegramMessage(tgUpdate({}, { id: -200 }), config, store, 'live:u1'), null);
+  assert.equal(telegramMessage(tgUpdate({ text: '/start' }), config, store, 'live:u1'), null);
+  assert.equal(telegramMessage(tgUpdate({}, { type: 'private' }), config, store, 'live:u1'), null);
+  assert.throws(() => validateTelegramConfig({ botToken: 'bad', chatIds: '-100' }), /token/);
+  assert.equal(validateTelegramConfig({ botToken: '123456:ABCDEFGHIJKLMNOPQRSTUVWXYZ', chatIds: '-100', backfillHours: 99 }).backfillHours, 24, 'capped at 24h');
   store.close();
 });
 
 test('handleTelegramUpdate verifies the private alert chat on /start from the owner', () => {
   const store = new Store(':memory:');
-  const env = { TELEGRAM_BOT_TOKEN: 'tok', TELEGRAM_ALERT_CHAT_ID: '5', TELEGRAM_CHAT_IDS: '-100' };
-  const r = handleTelegramUpdate({ update_id: 2, message: { message_id: 1, date: 1757678400, text: '/start', from: { id: 5, is_bot: false }, chat: { id: 5, type: 'private' } } }, env, store);
+  const config = { botToken: 'tok', alertChatId: '5', chatIds: '-100' };
+  const r = handleTelegramUpdate({ update_id: 2, message: { message_id: 1, date: 1757678400, text: '/start', from: { id: 5, is_bot: false }, chat: { id: 5, type: 'private' } } }, config, store, 'live:u1');
   assert.equal(r.verified, true);
-  assert.equal(store.get('telegram.verified'), alertChatFingerprint(env));
-  const wrong = handleTelegramUpdate({ update_id: 3, message: { message_id: 1, date: 1, text: '/start', from: { id: 6, is_bot: false }, chat: { id: 6, type: 'private' } } }, env, store);
+  assert.equal(store.get('telegram.verified:live:u1'), alertChatFingerprint(config));
+  const wrong = handleTelegramUpdate({ update_id: 3, message: { message_id: 1, date: 1, text: '/start', from: { id: 6, is_bot: false }, chat: { id: 6, type: 'private' } } }, config, store, 'live:u1');
   assert.equal(wrong.verified, false);
   store.close();
 });
 
 test('pollTelegram ingests updates and advances the offset', async () => {
   const store = new Store(':memory:');
-  store.saveSettings('live', { ...defaults(), criticalChecks: true });
-  const env = { TELEGRAM_BOT_TOKEN: 'tok', TELEGRAM_CHAT_IDS: '-100' };
+  store.saveSettings('live:u1', { ...defaults(), criticalChecks: true });
+  const config = { botToken: 'tok', chatIds: '-100', backfillHours: 24 };
   const seen = [];
   const fetcher = async url => { seen.push(url); return jsonRes({ ok: true, result: [tgUpdate(), { ...tgUpdate({ message_id: 11, text: 'second' }), update_id: 2 }] }); };
-  const n = await pollTelegram(store, env, fetcher);
+  const { ingested: n } = await pollTelegram(store, 'live:u1', config, fetcher, 1757678400000 + 60000);
   assert.equal(n, 2);
-  assert.equal(store.get('telegram.offset'), 3);
+  assert.equal(store.get('telegram.offset:live:u1'), 3);
   assert.match(seen[0], /offset=0/);
-  assert.equal(await pollTelegram(store, env, async () => jsonRes({ ok: true, result: [] })), 0);
-  assert.equal(await pollTelegram(store, { ...env, TELEGRAM_MODE: 'webhook' }, async () => { throw new Error('must not poll in webhook mode'); }), 0);
+  assert.equal((await pollTelegram(store, 'live:u1', config, async () => jsonRes({ ok: true, result: [] }))).ingested, 0);
+  // first run ignores updates older than the backfill window
+  const fresh = new Store(':memory:');
+  assert.equal((await pollTelegram(fresh, 'live:u1', { ...config, backfillHours: 1 }, fetcher, 1757678400000 + 5 * 3600000)).ingested, 0);
+  fresh.close();
   store.close();
 });
 
 test('sendTelegram never reports success without a provider message id', async () => {
-  const env = { TELEGRAM_BOT_TOKEN: 'tok', TELEGRAM_ALERT_CHAT_ID: '5' };
+  const env = { botToken: 'tok', alertChatId: '5' };
   assert.equal((await sendTelegram(env, 'hi', async () => jsonRes({ ok: true, result: { message_id: 42 } }))).state, 'provider_accepted');
   assert.equal((await sendTelegram(env, 'hi', async () => jsonRes({ ok: true, result: {} }))).state, 'failed');
   assert.equal((await sendTelegram(env, 'hi', async () => jsonRes({ ok: false, description: 'chat not found' }, 400))).state, 'failed');
@@ -128,15 +122,15 @@ test('encrypt/decrypt round-trips and rejects a bad key', () => {
   const key = 'a'.repeat(64);
   assert.equal(decrypt(encrypt('refresh-token', key), key), 'refresh-token');
   assert.throws(() => encrypt('x', 'short'), /64 hex/);
-  assert.equal(gmailReady({ GOOGLE_CLIENT_ID: 'a', GOOGLE_CLIENT_SECRET: 'b', TOKEN_ENCRYPTION_KEY: key }), true);
-  assert.equal(gmailReady({ GOOGLE_CLIENT_ID: 'a' }), false);
+  assert.equal(validateGmailConfig({}).labelId, 'INBOX');
+  assert.throws(() => validateGmailConfig({ backfillDays: 500 }), /Backfill/);
 });
 
 test('gmailToRaw decodes a text/plain part and builds subject line + thread link', () => {
   const msg = { id: 'm1', threadId: 't1', internalDate: '1757678400000', snippet: 'snip', labelIds: ['INBOX'],
     payload: { mimeType: 'multipart/alternative', headers: [{ name: 'From', value: 'Dana <dana@example.com>' }, { name: 'Subject', value: 'Proposal v3' }],
       parts: [{ mimeType: 'text/plain', body: { data: Buffer.from('Please review before tomorrow.').toString('base64url') } }] } };
-  const r = gmailToRaw(msg, 'me@example.com', 'INBOX');
+  const r = gmailToRaw(msg, 'me@example.com');
   assert.equal(r.conversation, 't1');
   assert.equal(r.conversationName, 'Email: Proposal v3');
   assert.match(r.text, /^Subject: Proposal v3\nPlease review/);
@@ -144,25 +138,23 @@ test('gmailToRaw decodes a text/plain part and builds subject line + thread link
 });
 
 test('pollGmail initial import: captures history cursor first, then imports recent threads', async () => {
-  const key = 'b'.repeat(64);
   const store = new Store(':memory:');
-  store.saveSettings('live', { ...defaults(), criticalChecks: true });
-  store.set('gmail.auth', { email: 'me@example.com', refresh: encrypt('rt', key) });
-  const env = { GOOGLE_CLIENT_ID: 'id', GOOGLE_CLIENT_SECRET: 'sec', TOKEN_ENCRYPTION_KEY: key };
+  store.saveSettings('live:u1', { ...defaults(), criticalChecks: true });
+  const config = { ...validateGmailConfig({ backfillDays: 3, backfillLimit: 10 }), email: 'me@example.com', refresh: 'rt' };
+  const env = { GOOGLE_CLIENT_ID: 'id', GOOGLE_CLIENT_SECRET: 'sec' };
   const message = { id: 'm1', threadId: 't1', internalDate: '1757678400000', labelIds: ['INBOX'], snippet: 'Anthony please approve', payload: { headers: [{ name: 'From', value: 'Dana' }, { name: 'Subject', value: 'Approve' }] } };
   const fetcher = async (url, opts) => {
     if (url.includes('oauth2.googleapis.com/token')) { assert.equal(new URLSearchParams(opts.body).get('refresh_token'), 'rt'); return jsonRes({ access_token: 'at' }); }
     if (url.endsWith('/profile')) return jsonRes({ historyId: '999' });
-    if (url.includes('/messages?')) return jsonRes({ messages: [{ id: 'm1' }] });
+    if (url.includes('/messages?')) { assert.match(url, /newer_than%3A3d/); assert.match(url, /maxResults=10/); return jsonRes({ messages: [{ id: 'm1' }] }); }
     if (url.includes('/messages/m1')) return jsonRes(message);
     if (url.includes('/threads/t1')) return jsonRes({ messages: [message] });
     throw new Error(`unexpected ${url}`);
   };
-  const n = await pollGmail(store, env, fetcher);
+  const { ingested: n } = await pollGmail(store, 'live:u1', config, env, fetcher);
   assert.equal(n, 1);
-  assert.equal(store.get('gmail.cursor'), '999');
-  assert.equal(store.messages('live')[0].backfill, true, 'initial import is marked backfill so it never triggers a live alert');
-  assert.equal(store.get('source:gmail').status, 'connected');
+  assert.equal(store.get('gmail.cursor:live:u1'), '999');
+  assert.equal(store.messages('live:u1')[0].backfill, true, 'initial import is marked backfill so it never triggers a live alert');
   store.close();
 });
 

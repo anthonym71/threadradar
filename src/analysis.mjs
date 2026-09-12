@@ -106,14 +106,15 @@ Grades:
 - TASK: actionable for the operator but can wait.
 - FYI: relevant information, no action.
 - IGNORE: unrelated, noise, or an ignored topic.
+Write title and summary in plain language for a busy person. In prose, express times as local times in words (e.g. "by 15:36 today", "before tomorrow's 3pm call"); put the machine-readable ISO-8601 value only in dueAt.
 Return exactly one JSON object:
 {"classification":"IGNORE|FYI|TASK|CRITICAL|REVIEW","relevant":boolean,"policyMatch":boolean,"unresolved":boolean,"title":string(<=100 chars),"summary":string(<=400 chars, plain language, what happened and what is being asked),"whyRelevant":string,"actionRequired":string|null,"dueAt":ISO-8601 timestamp|null,"whyCritical":string|null,"evidenceIds":string[]}
 evidenceIds must be copied from the supplied message "id" fields and must justify the grade.`;
 
 /** Which AI provider is configured, if any. */
 export function analyzerConfig(env) {
-  if (env.OPENAI_API_KEY) return { provider: 'openai', model: env.OPENAI_MODEL || 'gpt-4.1-mini', url: 'https://api.openai.com/v1/chat/completions', key: env.OPENAI_API_KEY };
-  if (env.OPENROUTER_API_KEY) return { provider: 'openrouter', model: env.OPENROUTER_MODEL || 'openai/gpt-4.1-mini', url: 'https://openrouter.ai/api/v1/chat/completions', key: env.OPENROUTER_API_KEY };
+  if (env.OPENAI_API_KEY) return { provider: 'openai', model: env.OPENAI_MODEL || 'gpt-5.4-mini', url: 'https://api.openai.com/v1/chat/completions', key: env.OPENAI_API_KEY };
+  if (env.OPENROUTER_API_KEY) return { provider: 'openrouter', model: env.OPENROUTER_MODEL || 'openai/gpt-5.4-mini', url: 'https://openrouter.ai/api/v1/chat/completions', key: env.OPENROUTER_API_KEY };
   return null;
 }
 
@@ -127,10 +128,11 @@ export async function classify(messages, settings, env, fetcher = fetch, now = n
   if (!ai) return { ...rules(messages, settings, now), analyzer: 'Rules (no AI key configured)' };
   const operator = { ...settings };
   delete operator.externalAlerts; delete operator.paused; delete operator.criticalOverride;
+  // gpt-5 / o-series reasoning models reject a custom temperature and use max_completion_tokens.
+  const reasoning = /(^|\/)(gpt-5|o[1-9])/.test(ai.model);
   const body = {
     model: ai.model,
-    temperature: 0,
-    max_tokens: 1200,
+    ...(reasoning ? { max_completion_tokens: 2000, reasoning_effort: env.OPENAI_REASONING_EFFORT || 'low' } : { temperature: 0, max_tokens: 1200 }),
     response_format: { type: 'json_object' },
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },

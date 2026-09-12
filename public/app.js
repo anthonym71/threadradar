@@ -3,7 +3,8 @@
   'use strict';
   const $ = s => document.querySelector(s);
   const params = new URLSearchParams(location.search);
-  const state = { space: params.get('space') === 'live' ? 'live' : 'demo', tab: 'radar', data: null, session: null, timer: null, expanded: new Set() };
+  const state = { mode: params.get('mode') === 'live' ? 'live' : 'demo', tab: 'radar', data: null, session: null, admin: null, expanded: new Set() };
+  let settingsDirty = false, lastKey = '';
 
   // ---- helpers -------------------------------------------------------------
   function h(tag, attrs = {}, ...children) {
@@ -12,6 +13,7 @@
       if (v === null || v === undefined || v === false) continue;
       if (k === 'class') el.className = v;
       else if (k === 'text') el.textContent = v;
+      else if (k === 'value') el.value = v;
       else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
       else el.setAttribute(k, v === true ? '' : v);
     }
@@ -36,50 +38,69 @@
   };
   async function api(path, body, method = body ? 'POST' : 'GET') {
     const url = new URL(path, location.origin);
-    if (!url.searchParams.has('space')) url.searchParams.set('space', state.space);
+    if (!url.searchParams.has('mode')) url.searchParams.set('mode', state.mode);
     const res = await fetch(url, { method, headers: { 'x-threadradar': '1', 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined, credentials: 'same-origin' });
     const data = await res.json().catch(() => ({}));
-    if (res.status === 401 && path !== '/api/login') { showLogin(true); throw new Error('Sign in required'); }
+    if (res.status === 401 && !['/api/login', '/api/setup', '/api/password'].includes(path)) { await checkSession(); throw new Error('Sign in required'); }
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     return data;
   }
-  function banner(text, kind = '') {
-    const b = $('#banner');
-    b.textContent = text; b.className = `banner ${kind}`; b.hidden = !text;
-  }
-  function empty(text) { return h('div', { class: 'empty', text }); }
+  function banner(text, kind = '') { const b = $('#banner'); b.textContent = text; b.className = `banner ${kind}`; b.hidden = !text; }
+  const empty = text => h('div', { class: 'empty', text });
+  const dot = cls => h('span', { class: `dot ${cls}` });
 
-  // ---- session ---------------------------------------------------------------
-  function showLogin(show) { $('#login').hidden = !show; }
+  // ---- session / auth --------------------------------------------------------
   async function checkSession() {
     state.session = await fetch('/api/session', { credentials: 'same-origin' }).then(r => r.json());
-    $('#logout').hidden = !state.session.passwordRequired;
-    showLogin(state.session.passwordRequired && !state.session.authenticated);
-    return state.session.authenticated;
+    const s = state.session;
+    $('#logout').hidden = !s.authenticated;
+    $('#pill-user').hidden = !s.authenticated;
+    if (s.user) $('#pill-user').textContent = `${s.user.username}${s.user.role === 'admin' ? ' · admin' : ''}`;
+    $('#tab-admin-btn').hidden = s.user?.role !== 'admin';
+    const show = !s.authenticated;
+    $('#auth').hidden = !show;
+    if (show) {
+      const setup = s.setupRequired;
+      $('#auth-intro').textContent = setup ? 'First run: create the administrator account. This account manages all other users.' : 'Sign in to your ThreadRadar workspace.';
+      $('#auth-submit').textContent = setup ? 'Create admin account' : 'Sign in';
+      $('#auth-confirm-row').hidden = !setup;
+      $('#auth-confirm').required = setup;
+      $('#auth-password').autocomplete = setup ? 'new-password' : 'current-password';
+      $('#auth-username').focus();
+    }
+    return s.authenticated;
   }
-  $('#login-form').addEventListener('submit', async e => {
+  $('#auth-form').addEventListener('submit', async e => {
     e.preventDefault();
-    $('#login-error').textContent = '';
-    try { await api('/api/login', { password: $('#password').value }); $('#password').value = ''; showLogin(false); await refresh(true); }
-    catch (err) { $('#login-error').textContent = err.message; }
+    $('#auth-error').textContent = '';
+    const setup = state.session?.setupRequired;
+    const username = $('#auth-username').value.trim(), password = $('#auth-password').value;
+    if (setup && password !== $('#auth-confirm').value) { $('#auth-error').textContent = 'Passwords do not match'; return; }
+    try {
+      await api(setup ? '/api/setup' : '/api/login', { username, password });
+      $('#auth-password').value = ''; $('#auth-confirm').value = '';
+      await checkSession(); await refresh(true);
+    } catch (err) { $('#auth-error').textContent = err.message; }
   });
-  $('#logout').addEventListener('click', async () => { await api('/api/logout', {}); location.reload(); });
+  $('#logout').addEventListener('click', async () => { await api('/api/logout', {}); location.href = '/'; });
 
   // ---- navigation ------------------------------------------------------------
   document.querySelectorAll('.segmented button').forEach(b => b.addEventListener('click', () => {
-    if (b.dataset.space === 'live' && state.session && !state.session.liveAvailable) { banner('Live mode needs APP_PASSWORD set on the server (at least 16 characters). Demo mode stays available.', 'warn'); return; }
-    state.space = b.dataset.space; state.expanded.clear();
+    state.mode = b.dataset.mode; state.expanded.clear();
     document.querySelectorAll('.segmented button').forEach(x => x.classList.toggle('active', x === b));
-    history.replaceState(null, '', `?space=${state.space}`);
+    history.replaceState(null, '', `?mode=${state.mode}&tab=${state.tab}`);
     refresh(true);
   }));
-  document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => {
-    state.tab = b.dataset.tab;
-    document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('active', x === b));
-    document.querySelectorAll('.tab').forEach(t => { t.hidden = t.id !== `tab-${state.tab}`; });
+  function showTab(tab) {
+    state.tab = tab;
+    document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('active', x.dataset.tab === tab));
+    document.querySelectorAll('.tab').forEach(t => { t.hidden = t.id !== `tab-${tab}`; });
+    history.replaceState(null, '', `?mode=${state.mode}&tab=${tab}`);
+    if (tab === 'settings') { settingsDirty = false; }
+    if (tab === 'admin') loadAdmin();
     render();
-    if (state.tab === 'settings') { settingsDirty = false; renderSettings(state.data || { settings: {} }); }
-  }));
+  }
+  document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
 
   // ---- rendering -------------------------------------------------------------
   function renderPills(d) {
@@ -92,12 +113,12 @@
   }
   function render() {
     const d = state.data; if (!d) return;
-    document.querySelectorAll('.segmented button').forEach(x => x.classList.toggle('active', x.dataset.space === d.space));
+    document.querySelectorAll('.segmented button').forEach(x => x.classList.toggle('active', x.dataset.mode === d.mode));
     renderPills(d);
     if (d.settings.paused) banner('Monitoring is paused in Settings. Nothing is analysed or sent until you resume.', 'warn');
-    else if (d.space === 'demo') banner('Demo workspace: every message here is synthetic and clearly labelled. Alerts are simulated and never leave this app.');
+    else if (d.mode === 'demo') banner('Demo workspace: every message here is synthetic and clearly labelled. Alerts are simulated and never leave this app.');
     else banner('');
-    renderRadar(d); renderSources(d); renderSettings(d); renderActivity(d);
+    renderRadar(d); renderIntegrations(d); renderSettings(d); renderActivity(d);
   }
 
   function renderRadar(d) {
@@ -108,17 +129,18 @@
     const ignored = open.filter(i => i.classification === 'IGNORE');
     const done = d.items.filter(i => i.status !== 'open');
     const sources = [...new Set(d.messages.map(m => m.source))].map(s => s[0].toUpperCase() + s.slice(1));
-    $('#hero-source').textContent = d.space === 'demo' ? 'Synthetic demo conversations · ' + (sources.join(', ') || 'Slack, Telegram, Gmail') : (sources.length ? 'Live · ' + sources.join(', ') : 'Live · no messages yet');
+    const connected = Object.values(d.connectors).filter(c => c.configured).map(c => c.label);
+    $('#hero-source').textContent = d.mode === 'demo' ? 'Synthetic demo conversations · ' + (sources.join(', ') || 'Slack, Telegram, Gmail') : (connected.length ? 'Live · ' + connected.join(', ') : 'Live · no integrations yet');
     if (!d.counts.messages) {
-      $('#hero-title').textContent = d.space === 'demo' ? 'Load the demo to see what you missed.' : 'Connect a source to start watching.';
-      $('#hero-sub').textContent = d.space === 'demo' ? 'Twenty-three synthetic messages across twelve conversations. One of them genuinely needs you.' : 'Configure Slack, Telegram or Gmail on the Sources tab. The worker keeps watching while this browser is closed.';
+      $('#hero-title').textContent = d.mode === 'demo' ? 'Load the demo to see what you missed.' : (connected.length ? 'Watching. Nothing has arrived yet.' : 'Connect an account to start watching.');
+      $('#hero-sub').textContent = d.mode === 'demo' ? 'Twenty-three synthetic messages across twelve conversations. One of them genuinely needs you.' : 'Add Slack, Telegram or Gmail on the Integrations tab. The worker keeps watching while this browser is closed.';
     } else {
       const n = needs.filter(i => i.classification === 'CRITICAL').length;
       $('#hero-title').textContent = `${d.counts.messages} messages while you were away. ${n ? `${n} need${n === 1 ? 's' : ''} you now.` : 'Nothing needs you right now.'}`;
-      $('#hero-sub').textContent = `${tasks.length} task${tasks.length === 1 ? '' : 's'} for later · ${fyi.length} briefing item${fyi.length === 1 ? '' : 's'} · ${ignored.length} conversation${ignored.length === 1 ? '' : 's'} filtered as noise · analysed by ${d.ai.configured ? d.ai.provider : 'rules'}`;
+      $('#hero-sub').textContent = `${tasks.length} task${tasks.length === 1 ? '' : 's'} for later · ${fyi.length} briefing item${fyi.length === 1 ? '' : 's'} · ${ignored.length} conversation${ignored.length === 1 ? '' : 's'} filtered as noise · analysed by ${d.ai.configured ? d.ai.model : 'rules'}`;
     }
     const actions = $('#radar-actions'); actions.replaceChildren();
-    if (d.space === 'demo') {
+    if (d.mode === 'demo') {
       actions.append(
         h('button', { class: 'primary', onclick: () => run('/api/demo/load', {}, 'Demo loaded and analysed.') }, d.counts.messages ? 'Reload demo' : 'Load demo'),
         h('button', { onclick: () => run('/api/demo/event', { kind: 'critical' }, 'Injected a new blocker.'), disabled: !d.counts.messages }, 'Simulate new blocker'),
@@ -127,11 +149,11 @@
       );
     } else {
       actions.append(
-        h('button', { class: 'primary', onclick: () => run('/api/poll', {}, 'Polled all configured sources.') }, 'Check sources now'),
-        h('button', { onclick: () => run('/api/run', {}, 'Routine review queued.') }, 'Run review now')
+        h('button', { class: 'primary', onclick: () => run('/api/poll', {}, 'Checked all your integrations.'), disabled: !connected.length }, 'Check sources now'),
+        h('button', { onclick: () => run('/api/run', {}, 'Routine review queued.'), disabled: !d.counts.messages }, 'Run review now')
       );
     }
-    const stats = $('#stats'); stats.replaceChildren(
+    $('#stats').replaceChildren(
       stat('critical', needs.length, 'Needs you'), stat('task', tasks.length, 'Tasks'), stat('fyi', fyi.length, 'Briefing'), stat('ignore', ignored.length, 'Filtered'),
       stat('', d.counts.messages, 'Messages scanned'), stat('', d.nextReview && d.settings.reviewMinutes ? until(new Date(d.nextReview).toISOString()).replace(/^.*\((in .*)\)$/, '$1') : 'off', 'Next routine review'),
       stat('', d.lastAnalysis ? ago(d.lastAnalysis) : '—', 'Last analysis')
@@ -149,7 +171,6 @@
     if (!items.length) { list.append(empty(emptyText)); return; }
     for (const i of items) list.append(card(i));
   }
-
   function card(i) {
     const node = $('#tpl-card').content.firstElementChild.cloneNode(true);
     node.classList.add(i.classification); if (i.status !== 'open') node.classList.add('closed');
@@ -171,82 +192,124 @@
     node.querySelector('.analyzer').textContent = `${i.analyzer} · ${i.messageCount} msg · ${i.evidenceIds.length} cited`;
     const buttons = node.querySelector('.buttons');
     const evidence = node.querySelector('.evidence');
-    buttons.append(h('button', { class: 'small', onclick: () => toggleEvidence(i, node) }, state.expanded.has(i.id) ? 'Hide evidence' : 'Evidence'));
+    buttons.append(h('button', { class: 'small', onclick: () => { if (state.expanded.has(i.id)) state.expanded.delete(i.id); else state.expanded.add(i.id); node.replaceWith(card(i)); } }, state.expanded.has(i.id) ? 'Hide evidence' : 'Evidence'));
     if (i.sourceUrl) buttons.append(h('a', { href: i.sourceUrl, target: '_blank', rel: 'noopener noreferrer' }, h('button', { class: 'small' }, 'Open source')));
     if (i.status === 'open' && i.classification !== 'IGNORE') {
       buttons.append(h('button', { class: 'small', onclick: () => run('/api/item', { id: i.id, status: 'done' }, 'Marked done.') }, 'Done'));
       buttons.append(h('button', { class: 'small danger', onclick: () => run('/api/item', { id: i.id, status: 'dismissed' }, 'Dismissed.') }, 'Dismiss'));
-    } else if (i.status !== 'open') {
-      buttons.append(h('button', { class: 'small', onclick: () => run('/api/item', { id: i.id, status: 'open' }, 'Reopened.') }, 'Reopen'));
-    }
+    } else if (i.status !== 'open') buttons.append(h('button', { class: 'small', onclick: () => run('/api/item', { id: i.id, status: 'open' }, 'Reopened.') }, 'Reopen'));
     if (state.expanded.has(i.id)) loadEvidence(i, evidence);
     return node;
-  }
-  async function toggleEvidence(i, node) {
-    if (state.expanded.has(i.id)) state.expanded.delete(i.id); else state.expanded.add(i.id);
-    node.replaceWith(card(i));
   }
   async function loadEvidence(i, box) {
     box.hidden = false; box.replaceChildren(h('div', { class: 'muted', text: 'Loading source messages…' }));
     try {
       const { messages } = await api(`/api/item?id=${encodeURIComponent(i.id)}`);
       box.replaceChildren(h('div', { class: 'muted', text: `Source conversation (${messages.length} messages). Highlighted lines are the evidence the analyser cited.` }));
-      for (const m of messages) {
-        box.append(h('div', { class: `msg ${i.evidenceIds.includes(m.id) ? 'cited' : ''}` },
-          h('div', { class: 'who' }, h('span', { text: `${m.sender}${m.deleted ? ' (deleted)' : ''}` }), h('span', { text: fmtTime(m.sentAt) })),
-          h('div', { class: 'txt', text: m.deleted ? '' : m.text })));
-      }
+      for (const m of messages) box.append(h('div', { class: `msg ${i.evidenceIds.includes(m.id) ? 'cited' : ''}` },
+        h('div', { class: 'who' }, h('span', { text: `${m.sender}${m.deleted ? ' (deleted)' : ''}` }), h('span', { text: fmtTime(m.sentAt) })),
+        h('div', { class: 'txt', text: m.deleted ? '' : m.text })));
     } catch (e) { box.replaceChildren(h('div', { class: 'error', text: e.message })); }
   }
 
-  function renderSources(d) {
-    const box = $('#sources'); box.replaceChildren();
-    for (const s of d.sources) {
-      const dot = s.status === 'connected' ? 'ok' : s.status === 'error' ? 'bad' : s.configured ? 'warn' : '';
-      const kv = h('div', { class: 'kv' });
-      const add = (k, v) => { if (v) kv.append(h('span', { text: k }), h('b', { text: v })); };
-      add('Status', s.status.replace(/_/g, ' '));
-      add('Mode', s.mode || 'not configured');
-      add('Detail', s.detail);
-      add('Last sync', s.lastSync ? ago(s.lastSync) : 'never');
-      if (s.error) add('Error', s.error);
-      const buttons = h('div', { class: 'buttons' });
-      if (s.source === 'gmail' && s.configured && d.space === 'live') buttons.append(h('button', { class: 'small primary', onclick: async () => { try { const { url } = await api('/api/gmail/connect', {}); location.href = url; } catch (e) { banner(e.message, 'bad'); } } }, s.status === 'awaiting_authorization' ? 'Connect Gmail (read-only)' : 'Re-authorise Gmail'));
-      if (s.source === 'telegram' && s.configured && s.mode === 'webhook' && d.space === 'live') buttons.append(h('button', { class: 'small', onclick: () => run('/api/telegram/register', {}, 'Webhook registration requested.') }, 'Register webhook'));
-      box.append(h('article', { class: 'card' },
-        h('div', { class: 'card-head' }, h('span', { class: `dot ${dot}` }), h('strong', { text: s.label })),
-        kv, buttons));
+  // ---- integrations ------------------------------------------------------------
+  const statusDot = c => c.status === 'connected' ? 'ok' : c.status === 'error' ? 'bad' : c.configured || c.status === 'saved' || c.status === 'authorized' ? 'warn' : '';
+  function field(label, name, value, opts = {}) {
+    return h('label', {}, label, h('input', { name, value: value ?? '', type: opts.type || 'text', placeholder: opts.placeholder || '', min: opts.min, max: opts.max, autocomplete: 'off', spellcheck: 'false' }));
+  }
+  function formValues(form) { const out = {}; for (const el of form.elements) if (el.name) out[el.name] = el.type === 'number' ? Number(el.value) : el.value; return out; }
+  async function saveConnector(source, form, statusEl) {
+    statusEl.textContent = 'Saving…';
+    try { await api('/api/connectors', { source, config: formValues(form) }); statusEl.textContent = 'Saved. First check running…'; await refresh(true); }
+    catch (e) { statusEl.textContent = e.message; statusEl.className = 'error'; }
+  }
+  function renderIntegrations(d) {
+    const box = $('#integrations');
+    if (document.activeElement && box.contains(document.activeElement)) return; // do not clobber a form being edited
+    box.replaceChildren();
+    const c = d.connectors;
+    const head = (x, extra) => h('div', { class: 'card-head' }, dot(statusDot(x)), h('strong', { text: x.label }), h('span', { class: 'muted', text: x.status.replace(/_/g, ' ') }), extra || null);
+    const kv = x => { const k = h('div', { class: 'kv' }); const add = (a, b) => { if (b) k.append(h('span', { text: a }), h('b', { text: b })); }; add('Detail', x.detail); add('Last sync', x.lastSync ? ago(x.lastSync) : 'never'); if (x.error) add('Error', x.error); return k; };
+    const common = (source, x, form, statusEl) => {
+      const buttons = h('div', { class: 'buttons' }, h('button', { type: 'submit', class: 'small primary' }, x.configured ? 'Save changes' : 'Save and connect'));
+      if (x.configured) {
+        buttons.append(h('button', { type: 'button', class: 'small', onclick: () => run('/api/poll', { source }, `${x.label} checked.`) }, 'Check now'));
+        buttons.append(h('button', { type: 'button', class: 'small danger', onclick: () => { if (confirm(`Remove ${x.label} and delete its stored credentials?`)) run(`/api/connectors?source=${source}`, null, `${x.label} removed.`, 'DELETE'); } }, 'Disconnect'));
+      }
+      form.append(buttons, statusEl);
+      form.addEventListener('submit', e => { e.preventDefault(); saveConnector(source, form, statusEl); });
+    };
+
+    // Slack
+    { const x = c.slack, st = h('span', { class: 'muted' });
+      const form = h('form', {},
+        field('Bot token (xoxb-…)', 'botToken', x.config.botToken, { type: 'password', placeholder: 'xoxb-…' }),
+        field('Channel IDs (comma separated)', 'channelIds', x.config.channelIds, { placeholder: 'C0123ABCD, C0456EFGH' }),
+        field('First run: read back this many hours', 'backfillHours', x.config.backfillHours, { type: 'number', min: 1, max: 2160 }),
+        h('p', { class: 'hint', text: 'Create a Slack app with scopes channels:history, channels:read, users:read, install it, invite the bot to each channel (/invite @bot). Channel ID is in the channel details.' }));
+      common('slack', x, form, st);
+      box.append(h('article', { class: 'card integration' }, head(x), kv(x), form));
     }
-    const t = d.sources.find(s => s.source === 'telegram').alerts;
+    // Telegram
+    { const x = c.telegram, st = h('span', { class: 'muted' });
+      const form = h('form', {},
+        field('Bot token from @BotFather', 'botToken', x.config.botToken, { type: 'password', placeholder: '123456789:ABC…' }),
+        field('Group chat IDs to watch (comma separated)', 'chatIds', x.config.chatIds, { placeholder: '-1001234567890' }),
+        field('Your private chat id (for alerts)', 'alertChatId', x.config.alertChatId, { placeholder: '123456789' }),
+        field('First run: read back this many hours (max 24)', 'backfillHours', x.config.backfillHours, { type: 'number', min: 1, max: 24 }),
+        h('p', { class: 'hint', text: 'In @BotFather run /setprivacy → Disable so the bot can read group messages, then add the bot to each group. Send /start to the bot from your own account to verify the alert chat. Telegram only replays the last 24 hours.' }));
+      common('telegram', x, form, st);
+      box.append(h('article', { class: 'card integration' }, head(x, x.bot ? h('span', { class: 'muted', text: x.bot }) : null), kv(x), form));
+    }
+    // Gmail
+    { const x = c.gmail, st = h('span', { class: 'muted' });
+      const form = h('form', {},
+        field('Label to watch', 'labelId', x.config.labelId, { placeholder: 'INBOX' }),
+        h('div', { class: 'row2' },
+          field('First run: read back this many days', 'backfillDays', x.config.backfillDays, { type: 'number', min: 1, max: 90 }),
+          field('Max messages on first run', 'backfillLimit', x.config.backfillLimit, { type: 'number', min: 1, max: 200 })),
+        h('p', { class: 'hint', text: 'Read-only access (gmail.readonly). You approve it in your Google account; the refresh token is encrypted on the server. Save your settings first, then connect.' }));
+      const buttons = h('div', { class: 'buttons' }, h('button', { type: 'submit', class: 'small' }, 'Save settings'));
+      if (x.appReady) buttons.append(h('button', { type: 'button', class: 'small primary', onclick: async () => { try { const f = formValues(form); await api('/api/connectors', { source: 'gmail', config: f }); const { url } = await api('/api/gmail/connect', {}); location.href = url; } catch (e) { st.textContent = e.message; st.className = 'error'; } } }, x.configured ? 'Re-authorise with Google' : 'Connect with Google'));
+      if (x.configured) {
+        buttons.append(h('button', { type: 'button', class: 'small', onclick: () => run('/api/poll', { source: 'gmail' }, 'Gmail checked.') }, 'Check now'));
+        buttons.append(h('button', { type: 'button', class: 'small danger', onclick: () => { if (confirm('Disconnect Gmail and delete the stored refresh token?')) run('/api/connectors?source=gmail', null, 'Gmail removed.', 'DELETE'); } }, 'Disconnect'));
+      }
+      form.append(buttons, st);
+      form.addEventListener('submit', e => { e.preventDefault(); saveConnector('gmail', form, st); });
+      box.append(h('article', { class: 'card integration' }, head(x), kv(x), form));
+    }
+
+    const t = c.telegram.alerts;
     const st = $('#alerts-status'); st.replaceChildren();
     const rows = [
-      [t.configured ? 'ok' : '', `Bot token and private chat id ${t.configured ? 'configured' : 'not configured (TELEGRAM_BOT_TOKEN, TELEGRAM_ALERT_CHAT_ID)'}`],
-      [t.verified ? 'ok' : 'warn', t.verified ? `Private chat verified ${ago(t.verifiedAt)} (you sent /start to the bot)` : 'Private chat not verified: send /start to the bot from your own Telegram account'],
-      [t.liveSendAllowed ? 'ok' : 'warn', t.liveSendAllowed ? 'ALLOW_LIVE_SEND=true: real alerts enabled on the server' : 'ALLOW_LIVE_SEND is not true: alerts stay in-app only'],
-      [d.settings.externalAlerts ? 'ok' : 'warn', d.settings.externalAlerts ? 'External alerts switched on in Settings' : 'External alerts switched off in Settings (live space)']
+      [t.configured ? 'ok' : '', t.configured ? 'Bot token and private chat id saved' : 'Save a Telegram bot token and your private chat id above'],
+      [t.verified ? 'ok' : 'warn', t.verified ? `Private chat verified ${ago(t.verifiedAt)} (you sent /start to your bot)` : 'Private chat not verified: send /start to your bot from your own Telegram account, then Check now'],
+      [t.liveSendAllowed ? 'ok' : 'warn', t.liveSendAllowed ? 'ALLOW_LIVE_SEND=true: real alerts enabled on the server' : 'ALLOW_LIVE_SEND is not true on the server: alerts stay in-app only'],
+      [d.settings.externalAlerts ? 'ok' : 'warn', d.settings.externalAlerts ? 'External alerts switched on in Settings' : 'External alerts switched off in Settings (live workspace)']
     ];
-    for (const [cls, text] of rows) st.append(h('div', { class: 'status-row' }, h('span', { class: `dot ${cls}` }), h('span', { text })));
-    if (d.space === 'live') st.append(h('div', { class: 'actions' }, h('button', { class: 'small', onclick: async () => { try { const r = await api('/api/telegram/test', {}); banner(`Test alert: ${r.state}. ${r.detail}`, r.state === 'provider_accepted' ? '' : 'warn'); refresh(); } catch (e) { banner(`Test alert not sent: ${e.message}`, 'bad'); } } }, 'Send test alert to my Telegram')));
+    for (const [cls, text] of rows) st.append(h('div', { class: 'status-row' }, dot(cls), h('span', { text })));
+    if (d.mode === 'live') st.append(h('div', { class: 'actions' }, h('button', { class: 'small', onclick: async () => { try { const r = await api('/api/telegram/test', {}); banner(`Test alert: ${r.state}. ${r.detail}`, r.state === 'provider_accepted' ? '' : 'warn'); refresh(true); } catch (e) { banner(`Test alert not sent: ${e.message}`, 'bad'); } } }, 'Send test alert to my Telegram')));
     else st.append(h('p', { class: 'muted', text: 'Switch to Live to send a real test alert. Demo alerts are always simulated.' }));
-    const sa = $('#source-actions'); sa.replaceChildren();
-    if (d.space === 'live') sa.append(h('button', { class: 'primary', onclick: () => run('/api/poll', {}, 'Polled all configured sources.') }, 'Check sources now'));
+    const ia = $('#integration-actions'); ia.replaceChildren();
+    if (d.mode === 'live') ia.append(h('button', { class: 'primary', onclick: () => run('/api/poll', {}, 'Checked all your integrations.') }, 'Check all now'));
   }
 
-  let settingsDirty = false;
+  // ---- settings ------------------------------------------------------------------
   function renderSettings(d) {
     const f = $('#settings-form');
-    if (settingsDirty || document.activeElement?.form === f) return;
+    if (settingsDirty || (document.activeElement && f.contains(document.activeElement))) return;
     for (const [k, v] of Object.entries(d.settings)) {
       const el = f.elements[k]; if (!el) continue;
       if (el.type === 'checkbox') el.checked = !!v; else el.value = String(v);
     }
-    f.elements.externalAlerts.disabled = d.space === 'demo';
+    f.elements.externalAlerts.disabled = d.mode === 'demo';
   }
   $('#settings-form').addEventListener('input', () => { settingsDirty = true; });
   $('#settings-form').addEventListener('submit', async e => {
     e.preventDefault();
-    const f = e.target; const out = {};
-    for (const el of f.elements) {
+    const out = {};
+    for (const el of e.target.elements) {
       if (!el.name) continue;
       if (el.type === 'checkbox') out[el.name] = el.checked;
       else if (el.type === 'number' || el.tagName === 'SELECT') out[el.name] = Number(el.value);
@@ -255,14 +318,21 @@
     try { await api('/api/settings', out); settingsDirty = false; $('#settings-status').textContent = 'Saved. Pending analysis re-timed.'; await refresh(true); }
     catch (err) { $('#settings-status').textContent = err.message; }
   });
+  $('#password-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const f = e.target;
+    try { await api('/api/password', { currentPassword: f.elements.currentPassword.value, newPassword: f.elements.newPassword.value }); f.reset(); $('#password-status').textContent = 'Password updated.'; }
+    catch (err) { $('#password-status').textContent = err.message; }
+  });
 
+  // ---- activity ------------------------------------------------------------------
   function renderActivity(d) {
     const al = $('#list-alerts'); al.replaceChildren();
     if (!d.notifications.length) al.append(empty('No alerts yet. Critical items appear here and, when enabled, in your private Telegram.'));
     for (const n of d.notifications) {
       const cls = n.state === 'provider_accepted' ? 'ok' : ['failed', 'unknown'].includes(n.state) ? 'bad' : n.state === 'pending' ? 'warn' : '';
       al.append(h('article', { class: 'card' },
-        h('div', { class: 'card-head' }, h('span', { class: `dot ${cls}` }), h('span', { class: 'badge', text: n.state.replace(/_/g, ' ') }), h('span', { text: n.channel || 'in_app' }), h('span', { text: ago(n.at) })),
+        h('div', { class: 'card-head' }, dot(cls), h('span', { class: 'badge', text: n.state.replace(/_/g, ' ') }), h('span', { text: n.channel || 'in_app' }), h('span', { text: ago(n.at) })),
         h('h4', { class: 'title', text: n.title }),
         h('p', { class: 'muted', text: n.detail + (n.providerMessageId ? ` Telegram message id ${n.providerMessageId}.` : '') })));
     }
@@ -274,28 +344,67 @@
     }
   }
 
-  // ---- data ------------------------------------------------------------------
-  async function run(path, body, okText) {
-    try { await api(path, body); if (okText) banner(okText); await refresh(true); }
+  // ---- admin ---------------------------------------------------------------------
+  async function loadAdmin() {
+    try { state.admin = await api('/api/admin/users'); renderAdmin(); } catch (e) { $('#admin-users').replaceChildren(empty(e.message)); }
+  }
+  function renderAdmin() {
+    const a = state.admin; if (!a) return;
+    const me = state.session?.user;
+    const list = $('#admin-users'); list.replaceChildren();
+    for (const u of a.users) {
+      const buttons = h('div', { class: 'buttons' });
+      const upd = (patch, msg) => async () => { try { await api('/api/admin/users/update', { id: u.id, ...patch }); $('#admin-status').textContent = msg; await loadAdmin(); } catch (e) { $('#admin-status').textContent = e.message; } };
+      if (u.id !== me?.id) {
+        buttons.append(h('button', { class: 'small', onclick: upd({ role: u.role === 'admin' ? 'user' : 'admin' }, 'Role updated.') }, u.role === 'admin' ? 'Make user' : 'Make admin'));
+        buttons.append(h('button', { class: 'small', onclick: upd({ disabled: !u.disabled }, u.disabled ? 'Enabled.' : 'Disabled.') }, u.disabled ? 'Enable' : 'Disable'));
+      }
+      buttons.append(h('button', { class: 'small', onclick: async () => { const pw = prompt(`New temporary password for ${u.username} (10+ characters):`); if (pw) await upd({ password: pw }, 'Password reset. Their sessions were signed out.')(); } }, 'Reset password'));
+      if (u.id !== me?.id) buttons.append(h('button', { class: 'small danger', onclick: async () => { if (confirm(`Delete ${u.username} and ALL their data and credentials? This cannot be undone.`)) { try { await api('/api/admin/users/delete', { id: u.id }); await loadAdmin(); } catch (e) { $('#admin-status').textContent = e.message; } } } }, 'Delete'));
+      list.append(h('article', { class: 'card' }, h('div', { class: 'user-row' },
+        h('div', { class: 'who' }, h('strong', {}, u.username, ' ', h('span', { class: `role ${u.role}` , text: u.role }), u.disabled ? h('span', { class: 'disabled-tag', text: ' disabled' }) : null),
+          h('small', { text: `Integrations: ${u.connectors.join(', ') || 'none'} · ${u.messages} live messages · ${u.openItems} open items · last login ${u.lastLoginAt ? ago(u.lastLoginAt) : 'never'}` })),
+        buttons)));
+    }
+    const s = a.server; const sb = $('#admin-server-body'); sb.replaceChildren();
+    const k = h('div', { class: 'kv' });
+    const add = (x, y) => k.append(h('span', { text: x }), h('b', { text: y }));
+    add('Worker', a.worker.running ? `running, heartbeat ${ago(a.worker.heartbeat)}` : 'stopped');
+    add('Analyser', s.ai || 'rules only');
+    add('Credential encryption key', s.encryptionKey === 'env' ? 'TOKEN_ENCRYPTION_KEY from .env' : s.encryptionKey === 'file' || s.encryptionKey === 'generated' ? 'generated, stored in data/secret.key' : 'ephemeral (in-memory database)');
+    add('Live Telegram alerts', s.liveSendAllowed ? 'enabled' : 'disabled (ALLOW_LIVE_SEND)');
+    add('Gmail OAuth app', s.gmailAppReady ? 'configured' : 'not configured (GOOGLE_CLIENT_ID / SECRET)');
+    sb.append(k);
+  }
+  $('#admin-create').addEventListener('submit', async e => {
+    e.preventDefault();
+    const f = e.target;
+    try { await api('/api/admin/users', { username: f.elements.username.value, password: f.elements.password.value, role: f.elements.role.value }); f.reset(); $('#admin-status').textContent = 'User created. Share the temporary password and ask them to change it in Settings.'; await loadAdmin(); }
+    catch (err) { $('#admin-status').textContent = err.message; }
+  });
+
+  // ---- data ------------------------------------------------------------------------
+  async function run(path, body, okText, method) {
+    try { await api(path, body, method); if (okText) banner(okText); await refresh(true); }
     catch (e) { banner(e.message, 'bad'); }
   }
-  let lastKey = '';
   async function refresh(force = false) {
+    if (!state.session?.authenticated) return;
     try {
       const data = await api('/api/state');
-      // Re-render only when something meaningful changed, so open panels and buttons stay stable.
       const { worker, ...rest } = data;
       const key = JSON.stringify(rest);
       state.data = data;
-      if (force || key !== lastKey) { lastKey = key; render(); }
-      else renderPills(data);
+      if (force || key !== lastKey) { lastKey = key; render(); } else renderPills(data);
     } catch (e) { if (e.message !== 'Sign in required') banner(e.message, 'bad'); }
   }
   async function boot() {
-    if (params.get('gmail') === 'connected') banner('Gmail authorised. The worker will import recent mail on its next poll.');
+    if (params.get('gmail') === 'connected') banner('Gmail authorised. The first import is running now.');
     const ok = await checkSession();
-    if (ok) await refresh();
-    state.timer = setInterval(async () => { if (document.hidden) return; if (state.session?.passwordRequired && $('#login').hidden === false) return; await refresh(); }, 5000);
+    const tab = params.get('tab');
+    if (['radar', 'integrations', 'settings', 'activity', 'admin'].includes(tab)) showTab(tab);
+    if (ok) await refresh(true);
+    setInterval(async () => { if (document.hidden || !state.session?.authenticated) return; await refresh(); }, 5000);
   }
   boot();
 })();
