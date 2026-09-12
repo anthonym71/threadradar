@@ -58,6 +58,22 @@ npm test
 npm start
 ```
 
+**Windows PowerShell:** `&&` is not supported in Windows PowerShell 5.1 and `npm` may be blocked by the script execution policy. Run the commands one per line and use `npm.cmd` (or call Node directly):
+
+```powershell
+cd threadradar
+git checkout build/functional-mvp
+npm.cmd test
+npm.cmd start
+```
+
+or, without npm at all:
+
+```powershell
+node --test test/*.test.mjs
+node --env-file-if-exists=.env server.mjs
+```
+
 Open http://127.0.0.1:3100 and click **Load demo**. The Demo workspace contains only synthetic, clearly labelled conversations and never sends anything outside the app. Use *Simulate new blocker*, *Simulate resolution* and *Simulate noise* to show critical detection, de-escalation and filtering live.
 
 To analyse with a real model instead of the rules engine, put an `OPENAI_API_KEY` in `.env` and restart. The analyser in use is shown on every card and in the top-right pill.
