@@ -134,7 +134,7 @@ test('live critical item: alert recorded in-app with the exact reason it was not
   try {
     const u = app.store.createUser({ username: 'anthony', password: PW, role: 'admin' });
     const live = spaceOf('live', u.id);
-    app.store.saveSettings(live, { ...defaults(), externalAlerts: true, criticalChecks: true });
+    app.store.saveSettings(live, { ...defaults(), externalAlerts: true, criticalChecks: true, quietStart: 0, quietEnd: 0 });
     const now = new Date();
     app.store.ingest(live, [{ source: 'slack', account: 'T1', conversation: 'C1:1', conversationName: '#ops', messageId: 'C1:1', sender: 'Dana', text: `Anthony, the client launch needs your approval now. Deadline: ${new Date(now.getTime() + 10 * 60000).toISOString()}`, sentAt: now.toISOString(), receivedAt: now.toISOString() }]);
     await app.worker.tick();

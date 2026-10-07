@@ -1,0 +1,21 @@
+name: ThreadRadar verification
+
+on:
+  pull_request:
+  push:
+    branches:
+      - reconcile/overnight-2026-10-07
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node --test test/*.test.mjs
